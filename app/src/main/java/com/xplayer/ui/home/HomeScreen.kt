@@ -95,7 +95,7 @@ private fun HomeTopBar(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // Gradient brand name
                 Text(
-                    text = "映",
+                    text = "X",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         brush = Brush.horizontalGradient(
                             colors = listOf(GreenStart, GreenEnd)
@@ -104,7 +104,7 @@ private fun HomeTopBar(
                     ),
                 )
                 Text(
-                    text = "画",
+                    text = "Player",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         color = TextPrimary,
                         fontWeight = FontWeight.ExtraBold,
