@@ -1,0 +1,293 @@
+package com.xplayer.ui.player
+
+import android.content.Context
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.view.Surface
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.xplayer.data.model.DecoderMode
+import com.xplayer.data.model.PlayOrientation
+import com.xplayer.data.repository.SettingsRepository
+import com.xplayer.data.repository.VideoRepository
+import com.xplayer.player.PlayRequest
+import com.xplayer.player.PlayerEngine
+import com.xplayer.player.PlayerEngines
+import com.xplayer.player.PlayerListener
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+data class PlayerUiState(
+    val videoPath: String = "",
+    val title: String = "",
+    val isPlaying: Boolean = false,
+    val isBuffering: Boolean = false,
+    val duration: Long = 0L,
+    val position: Long = 0L,
+    val volume: Int = 100,
+    val brightness: Float = 0.5f,
+    val speed: Float = 1.0f,
+    val isLocked: Boolean = false,
+    val showControls: Boolean = true,
+    val audioTracks: List<TrackInfo> = emptyList(),
+    val subtitleTracks: List<TrackInfo> = emptyList(),
+    val selectedAudioTrack: Int = -1,
+    val selectedSubTrack: Int = -1,
+    val orientation: PlayOrientation = PlayOrientation.DEFAULT,
+    val resolvedOrientation: PlayOrientation = PlayOrientation.PORTRAIT,
+    val isCompleted: Boolean = false,
+    val message: String? = null,
+    /** 视频显示宽高比 (宽/高, 已计入旋转与像素宽高比); <=0 表示未知, 此时 Surface 铺满. */
+    val videoAspectRatio: Float = 0f,
+)
+
+data class TrackInfo(val id: Int, val name: String)
+
+@HiltViewModel
+class PlayerViewModel @Inject constructor(
+    savedStateHandle: SavedStateHandle,
+    private val videoRepository: VideoRepository,
+    private val settingsRepository: SettingsRepository,
+    @ApplicationContext private val context: Context,
+) : ViewModel() {
+
+    private val videoPath: String = checkNotNull(savedStateHandle["videoPath"])
+
+    private val _state = MutableStateFlow(PlayerUiState(videoPath = videoPath))
+    val uiState: StateFlow<PlayerUiState> = _state.asStateFlow()
+
+    /** 播放内核 (ExoPlayer + NextLib). 解码方式在进入播放页时读一次设置确定. */
+    private var engine: PlayerEngine? = null
+    private var progressJob: Job? = null
+    private var hideControlsJob: Job? = null
+    private var surface: Surface? = null
+
+    init {
+        viewModelScope.launch {
+            val settings = settingsRepository.settingsFlow.first()
+            val resolved = resolveOrientation(settings.defaultOrientation, videoPath)
+            _state.update {
+                it.copy(
+                    orientation = settings.defaultOrientation,
+                    resolvedOrientation = resolved,
+                    title = videoPath.substringAfterLast("/"),
+                )
+            }
+            // 用当前解码设置创建内核 (ExoPlayer + NextLib).
+            engine = PlayerEngines.create(settings.decoderMode, context).also { e ->
+                e.listener = engineListener
+            }
+            // Surface 可能早于 init 就绪, 若已挂上则立即开播.
+            surface?.let { attachAndOpen(it) }
+        }
+    }
+
+    private val engineListener = object : PlayerListener {
+        override fun onReady() {
+            startProgressTracking()
+            updateTracks()
+        }
+
+        override fun onPlayingChanged(playing: Boolean) {
+            _state.update { it.copy(isPlaying = playing) }
+        }
+
+        override fun onBuffering(buffering: Boolean) {
+            _state.update { it.copy(isBuffering = buffering) }
+        }
+
+        override fun onEnded() {
+            _state.update { it.copy(isPlaying = false, isCompleted = true) }
+            progressJob?.cancel()
+        }
+
+        override fun onError(code: Int, message: String) {
+            _state.update { it.copy(isBuffering = false, message = message) }
+        }
+
+        override fun onNotice(message: String) {
+            _state.update { it.copy(message = message) }
+        }
+
+        override fun onVideoSize(width: Int, height: Int, pixelRatio: Float, rotationDegrees: Int) {
+            if (width <= 0 || height <= 0) return
+            // 90/270 旋转时宽高互换
+            val swapped = rotationDegrees == 90 || rotationDegrees == 270
+            val w = if (swapped) height else width
+            val h = if (swapped) width else height
+            val ratio = if (pixelRatio > 0f) pixelRatio else 1f
+            val aspect = (w.toFloat() * ratio) / h.toFloat()
+            _state.update { it.copy(videoAspectRatio = aspect) }
+        }
+    }
+
+    /** 由 PlayerSurface 的 surfaceCreated 回调调用. */
+    fun onSurfaceCreated(holderSurface: Surface) {
+        surface = holderSurface
+        if (engine != null) {
+            attachAndOpen(holderSurface)
+        } else {
+            // 等待 init 中 engine 创建完成 (正常 < 200ms).
+            viewModelScope.launch {
+                var waited = 0
+                while (engine == null && waited < 3000) {
+                    delay(20)
+                    waited += 20
+                }
+                engine?.let { attachAndOpen(holderSurface) }
+            }
+        }
+    }
+
+    fun onSurfaceDestroyed() {
+        engine?.setSurface(null)
+    }
+
+    private fun attachAndOpen(s: Surface) {
+        val e = engine ?: return
+        e.setSurface(s)
+        // 媒体项尚未打开时才 open (currentPosition/duration 都是 0).
+        if (e.duration <= 0L && e.currentPosition <= 0L) {
+            val mediaItem = if (isNetworkUrl(videoPath)) videoPath
+            else Uri.fromFile(java.io.File(videoPath)).toString()
+            e.open(PlayRequest(url = mediaItem))
+        }
+        e.play()
+    }
+
+    private fun isNetworkUrl(path: String): Boolean =
+        path.startsWith("http://") || path.startsWith("https://") ||
+            path.startsWith("rtsp://") || path.startsWith("rtmp://") ||
+            path.startsWith("mms://") || path.startsWith("ftp://")
+
+    private fun resolveOrientation(orientation: PlayOrientation, path: String): PlayOrientation {
+        return when (orientation) {
+            PlayOrientation.DEFAULT -> {
+                val (w, h) = getVideoDimensions(path)
+                if (w > 0 && h > 0 && w > h) PlayOrientation.LANDSCAPE else PlayOrientation.PORTRAIT
+            }
+            else -> orientation
+        }
+    }
+
+    private fun getVideoDimensions(path: String): Pair<Int, Int> {
+        return try {
+            val retriever = MediaMetadataRetriever()
+            if (isNetworkUrl(path)) retriever.setDataSource(path, emptyMap())
+            else retriever.setDataSource(path)
+            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            retriever.release()
+            Pair(w, h)
+        } catch (e: Exception) {
+            Pair(0, 0)
+        }
+    }
+
+    private fun startProgressTracking() {
+        progressJob?.cancel()
+        progressJob = viewModelScope.launch {
+            while (true) {
+                val e = engine ?: break
+                _state.update { it.copy(position = e.currentPosition, duration = e.duration) }
+                delay(500L)
+            }
+        }
+    }
+
+    private fun updateTracks() {
+        val e = engine ?: return
+        val audio = e.getAudioTracks().map { TrackInfo(it.id, it.name) }
+        val subs = mutableListOf<TrackInfo>(TrackInfo(-1, "无字幕"))
+        subs += e.getSubtitleTracks().map { TrackInfo(it.id, it.name) }
+        _state.update {
+            it.copy(
+                audioTracks = audio,
+                subtitleTracks = subs,
+                selectedAudioTrack = audio.firstOrNull()?.id ?: -1,
+                selectedSubTrack = -1,
+            )
+        }
+    }
+
+    // ── Controls ────────────────────────────────────────────────────────────
+
+    fun togglePlayPause() {
+        val e = engine ?: return
+        if (e.isPlaying) e.pause() else e.play()
+        scheduleHideControls()
+    }
+
+    fun seekTo(ms: Long) {
+        engine?.seekTo(ms)
+        _state.update { it.copy(position = ms) }
+        scheduleHideControls()
+    }
+
+    fun seekRelative(deltaMs: Long) {
+        val newPos = (_state.value.position + deltaMs).coerceIn(0L, _state.value.duration)
+        seekTo(newPos)
+    }
+
+    fun setVolume(vol: Int) {
+        // Media3 音量由 App 层控制, 这里保留 UI 状态.
+        _state.update { it.copy(volume = vol.coerceIn(0, 200)) }
+    }
+
+    fun setBrightness(brightness: Float) {
+        _state.update { it.copy(brightness = brightness.coerceIn(0f, 1f)) }
+    }
+
+    fun setSpeed(speed: Float) {
+        engine?.setSpeed(speed)
+        _state.update { it.copy(speed = speed) }
+    }
+
+    fun toggleLock() { _state.update { it.copy(isLocked = !it.isLocked) } }
+
+    fun showControls() {
+        _state.update { it.copy(showControls = true) }
+        scheduleHideControls()
+    }
+
+    fun toggleControls() {
+        val showing = _state.value.showControls
+        _state.update { it.copy(showControls = !showing) }
+        if (!showing) scheduleHideControls()
+        else hideControlsJob?.cancel()
+    }
+
+    fun consumeMessage() { _state.update { it.copy(message = null) } }
+
+    private fun scheduleHideControls() {
+        hideControlsJob?.cancel()
+        hideControlsJob = viewModelScope.launch {
+            delay(4_000L)
+            _state.update { it.copy(showControls = false) }
+        }
+    }
+
+    fun selectAudioTrack(id: Int) {
+        engine?.selectAudioTrack(id)
+        _state.update { it.copy(selectedAudioTrack = id) }
+    }
+
+    fun selectSubtitleTrack(id: Int) {
+        engine?.selectSubtitleTrack(id)
+        _state.update { it.copy(selectedSubTrack = id) }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        progressJob?.cancel()
+        hideControlsJob?.cancel()
+        engine?.release()
+        engine = null
+    }
+}
