@@ -72,10 +72,4 @@ class SettingsViewModel @Inject constructor(
     fun setContinuousPlay(v: Boolean) = viewModelScope.launch {
         settingsRepository.updateContinuousPlay(v)
     }
-    fun setSubtitleSize(v: Int) = viewModelScope.launch {
-        settingsRepository.updateSubtitleSize(v)
-    }
-    fun setSubtitleColor(c: SubtitleColor) = viewModelScope.launch {
-        settingsRepository.updateSubtitleColor(c)
-    }
 }

@@ -134,41 +134,6 @@ fun SettingsScreen(
                     checked = settings.showThumbnail,
                     onCheckedChange = { viewModel.setShowThumbnail(it) },
                 )
-                HorizontalDivider(color = DividerColor, modifier = Modifier.padding(horizontal = 16.dp))
-
-                // Subtitle size slider
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(Icons.Outlined.ClosedCaption, null, tint = TextSecondary, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Text("字幕大小", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                        Text("${settings.subtitleSize}sp", color = GreenPrimary, style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Slider(
-                        value = settings.subtitleSize.toFloat(),
-                        onValueChange = { viewModel.setSubtitleSize(it.toInt()) },
-                        valueRange = 10f..32f,
-                        steps = 21,
-                        colors = SliderDefaults.colors(
-                            thumbColor = GreenPrimary,
-                            activeTrackColor = GreenPrimary,
-                        ),
-                    )
-                }
-
-                HorizontalDivider(color = DividerColor, modifier = Modifier.padding(horizontal = 16.dp))
-
-                // Subtitle color
-                SegmentedSetting(
-                    icon = Icons.Outlined.FormatColorText,
-                    label = "字幕颜色",
-                    options = SubtitleColor.entries.map { it.label },
-                    selectedIndex = SubtitleColor.entries.indexOf(settings.subtitleColor),
-                    onSelect = { viewModel.setSubtitleColor(SubtitleColor.entries[it]) },
-                )
             }
 
             // ── About ──────────────────────────────────────────────────────

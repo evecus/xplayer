@@ -7,7 +7,6 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.xplayer.data.model.AppSettings
 import com.xplayer.data.model.DecoderMode
 import com.xplayer.data.model.PlayOrientation
-import com.xplayer.data.model.SubtitleColor
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -27,8 +26,6 @@ class SettingsRepository @Inject constructor(
         val DEFAULT_ORIENTATION = stringPreferencesKey("default_orientation")
         val SHOW_THUMBNAIL = booleanPreferencesKey("show_thumbnail")
         val CONTINUOUS_PLAY = booleanPreferencesKey("continuous_play")
-        val SUBTITLE_SIZE = intPreferencesKey("subtitle_size")
-        val SUBTITLE_COLOR = stringPreferencesKey("subtitle_color")
         val LAST_SCAN_TIME = longPreferencesKey("last_scan_time")
     }
 
@@ -47,10 +44,6 @@ class SettingsRepository @Inject constructor(
                 ),
                 showThumbnail = prefs[Keys.SHOW_THUMBNAIL] ?: true,
                 continuousPlay = prefs[Keys.CONTINUOUS_PLAY] ?: true,
-                subtitleSize = prefs[Keys.SUBTITLE_SIZE] ?: 16,
-                subtitleColor = SubtitleColor.valueOf(
-                    prefs[Keys.SUBTITLE_COLOR] ?: SubtitleColor.WHITE.name
-                ),
                 lastScanTime = prefs[Keys.LAST_SCAN_TIME] ?: 0L,
             )
         }
@@ -69,14 +62,6 @@ class SettingsRepository @Inject constructor(
 
     suspend fun updateContinuousPlay(continuous: Boolean) {
         context.dataStore.edit { it[Keys.CONTINUOUS_PLAY] = continuous }
-    }
-
-    suspend fun updateSubtitleSize(size: Int) {
-        context.dataStore.edit { it[Keys.SUBTITLE_SIZE] = size }
-    }
-
-    suspend fun updateSubtitleColor(color: SubtitleColor) {
-        context.dataStore.edit { it[Keys.SUBTITLE_COLOR] = color.name }
     }
 
     suspend fun updateLastScanTime(time: Long) {
