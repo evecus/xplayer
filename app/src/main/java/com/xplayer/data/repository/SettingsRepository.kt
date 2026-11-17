@@ -26,6 +26,7 @@ class SettingsRepository @Inject constructor(
         val DEFAULT_ORIENTATION = stringPreferencesKey("default_orientation")
         val SHOW_THUMBNAIL = booleanPreferencesKey("show_thumbnail")
         val CONTINUOUS_PLAY = booleanPreferencesKey("continuous_play")
+        val SWIPE_SWITCH_VIDEO = booleanPreferencesKey("swipe_switch_video")
         val LAST_SCAN_TIME = longPreferencesKey("last_scan_time")
     }
 
@@ -44,6 +45,7 @@ class SettingsRepository @Inject constructor(
                 ),
                 showThumbnail = prefs[Keys.SHOW_THUMBNAIL] ?: true,
                 continuousPlay = prefs[Keys.CONTINUOUS_PLAY] ?: true,
+                swipeSwitchVideo = prefs[Keys.SWIPE_SWITCH_VIDEO] ?: true,
                 lastScanTime = prefs[Keys.LAST_SCAN_TIME] ?: 0L,
             )
         }
@@ -62,6 +64,10 @@ class SettingsRepository @Inject constructor(
 
     suspend fun updateContinuousPlay(continuous: Boolean) {
         context.dataStore.edit { it[Keys.CONTINUOUS_PLAY] = continuous }
+    }
+
+    suspend fun updateSwipeSwitchVideo(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SWIPE_SWITCH_VIDEO] = enabled }
     }
 
     suspend fun updateLastScanTime(time: Long) {

@@ -123,6 +123,16 @@ fun SettingsScreen(
                     checked = settings.continuousPlay,
                     onCheckedChange = { viewModel.setContinuousPlay(it) },
                 )
+                HorizontalDivider(color = DividerColor, modifier = Modifier.padding(horizontal = 16.dp))
+
+                // Swipe to switch video
+                SwitchSetting(
+                    icon = Icons.Outlined.SwipeVertical,
+                    label = "上下滑动切换视频",
+                    description = "关闭后: 左半屏上下滑调亮度, 右半屏调音量",
+                    checked = settings.swipeSwitchVideo,
+                    onCheckedChange = { viewModel.setSwipeSwitchVideo(it) },
+                )
             }
 
             // ── Display ───────────────────────────────────────────────────

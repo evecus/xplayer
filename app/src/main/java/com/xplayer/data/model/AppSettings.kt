@@ -5,6 +5,8 @@ data class AppSettings(
     val defaultOrientation: PlayOrientation = PlayOrientation.DEFAULT,
     val showThumbnail: Boolean = true,
     val continuousPlay: Boolean = true,
+    /** true: 上下滑动切换视频; false: 左半屏调亮度、右半屏调音量. */
+    val swipeSwitchVideo: Boolean = true,
     val lastScanTime: Long = 0L,
 )
 

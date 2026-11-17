@@ -1,7 +1,9 @@
 package com.xplayer.ui.player
 
 import android.content.Context
+import android.media.AudioManager
 import android.media.MediaMetadataRetriever
+import android.provider.Settings
 import android.net.Uri
 import android.view.Surface
 import androidx.lifecycle.SavedStateHandle
@@ -17,7 +19,9 @@ import com.xplayer.player.PlayerEngines
 import com.xplayer.player.PlayerListener
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -30,8 +34,14 @@ data class PlayerUiState(
     val isBuffering: Boolean = false,
     val duration: Long = 0L,
     val position: Long = 0L,
-    val volume: Int = 100,
-    val brightness: Float = 0.5f,
+    /** 系统媒体音量百分比 0..100 (进入页面时读取). */
+    val volume: Float = 100f,
+    /** 窗口亮度 0..1; <0 表示用户尚未调整, 沿用系统亮度 (含自动亮度). */
+    val brightness: Float = -1f,
+    /** true: 上下滑动切视频; false: 左半屏亮度 / 右半屏音量. */
+    val swipeSwitchVideo: Boolean = false,
+    /** 亮度 / 音量调节时的临时提示 (如 "亮度 60%"). */
+    val indicator: String? = null,
     val speed: Float = 1.0f,
     val isLocked: Boolean = false,
     val showControls: Boolean = true,
@@ -62,6 +72,17 @@ class PlayerViewModel @Inject constructor(
 
     private val videoPath: String = checkNotNull(savedStateHandle["videoPath"])
 
+    /** 当前正在播放的视频 (上下滑动切换后与 [videoPath] 不同). */
+    private var currentPath: String = videoPath
+
+    private var continuousPlay = true
+    private var indicatorJob: Job? = null
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    /** 同文件夹的视频列表 (顺序与文件夹页一致), 网络流 / 未入库的视频为空 → 不支持切换. */
+    private var playlist: List<com.xplayer.data.model.VideoFile> = emptyList()
+    private var playlistIndex = -1
+
     private val _state = MutableStateFlow(PlayerUiState(videoPath = videoPath))
     val uiState: StateFlow<PlayerUiState> = _state.asStateFlow()
 
@@ -76,8 +97,11 @@ class PlayerViewModel @Inject constructor(
         viewModelScope.launch {
             val settings = settingsRepository.settingsFlow.first()
             val resolved = resolveOrientation(settings.defaultOrientation, videoPath)
+            continuousPlay = settings.continuousPlay
             _state.update {
                 it.copy(
+                    swipeSwitchVideo = settings.swipeSwitchVideo,
+                    volume = currentVolumePercent(),
                     orientation = settings.defaultOrientation,
                     resolvedOrientation = resolved,
                     title = videoPath.substringAfterLast("/"),
@@ -89,6 +113,68 @@ class PlayerViewModel @Inject constructor(
             }
             // Surface 可能早于 init 就绪, 若已挂上则立即开播.
             surface?.let { attachAndOpen(it) }
+            loadPlaylist()
+        }
+    }
+
+    private suspend fun loadPlaylist() {
+        if (isNetworkUrl(videoPath)) return
+        val current = videoRepository.getVideoByPath(videoPath) ?: return
+        val list = videoRepository.getVideosInFolder(current.folderPath).first()
+        val idx = list.indexOfFirst { it.path == videoPath }
+        if (idx >= 0) {
+            playlist = list
+            playlistIndex = idx
+        }
+    }
+
+    /** 上滑: 下一个视频. */
+    fun playNext() = switchBy(+1)
+
+    /** 下滑: 上一个视频. */
+    fun playPrevious() = switchBy(-1)
+
+    private fun switchBy(delta: Int) {
+        if (playlist.size <= 1) {
+            _state.update { it.copy(message = "没有其他视频可切换") }
+            return
+        }
+        val target = playlistIndex + delta
+        if (target !in playlist.indices) {
+            _state.update { it.copy(message = if (delta > 0) "已经是最后一个视频" else "已经是第一个视频") }
+            return
+        }
+        switchTo(target)
+    }
+
+    private fun switchTo(index: Int) {
+        val e = engine ?: return
+        val video = playlist[index]
+        playlistIndex = index
+        currentPath = video.path
+        progressJob?.cancel()
+        _state.update {
+            it.copy(
+                videoPath = video.path,
+                title = video.path.substringAfterLast("/"),
+                position = 0L,
+                duration = 0L,
+                isCompleted = false,
+                isBuffering = true,
+                audioTracks = emptyList(),
+                subtitleTracks = emptyList(),
+                selectedAudioTrack = -1,
+                selectedSubTrack = -1,
+                message = null,
+            )
+        }
+        e.open(PlayRequest(url = Uri.fromFile(java.io.File(video.path)).toString()))
+        e.play()
+        viewModelScope.launch {
+            // 方向设为「默认」时, 按新视频宽高重新决定横/竖屏.
+            val settings = settingsRepository.settingsFlow.first()
+            val resolved = withContext(Dispatchers.IO) { resolveOrientation(settings.defaultOrientation, video.path) }
+            if (currentPath == video.path) _state.update { it.copy(resolvedOrientation = resolved) }
         }
     }
 
@@ -111,6 +197,10 @@ class PlayerViewModel @Inject constructor(
         override fun onEnded() {
             _state.update { it.copy(isPlaying = false, isCompleted = true) }
             progressJob?.cancel()
+            // 连续播放: 播完自动播同文件夹下一个; 最后一个则停在结束状态.
+            if (continuousPlay && playlistIndex >= 0 && playlistIndex + 1 in playlist.indices) {
+                switchTo(playlistIndex + 1)
+            }
         }
 
         override fun onError(code: Int, message: String) {
@@ -176,8 +266,8 @@ class PlayerViewModel @Inject constructor(
         e.setSurface(s)
         // 媒体项尚未打开时才 open (currentPosition/duration 都是 0).
         if (e.duration <= 0L && e.currentPosition <= 0L) {
-            val mediaItem = if (isNetworkUrl(videoPath)) videoPath
-            else Uri.fromFile(java.io.File(videoPath)).toString()
+            val mediaItem = if (isNetworkUrl(currentPath)) currentPath
+            else Uri.fromFile(java.io.File(currentPath)).toString()
             e.open(PlayRequest(url = mediaItem))
         }
         e.play()
@@ -257,13 +347,44 @@ class PlayerViewModel @Inject constructor(
         seekTo(newPos)
     }
 
-    fun setVolume(vol: Int) {
-        // Media3 音量由 App 层控制, 这里保留 UI 状态.
-        _state.update { it.copy(volume = vol.coerceIn(0, 200)) }
+    private fun currentVolumePercent(): Float {
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        return audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) * 100f / max
     }
 
-    fun setBrightness(brightness: Float) {
-        _state.update { it.copy(brightness = brightness.coerceIn(0f, 1f)) }
+    /** [fraction]: 滑动距离占屏幕高度的比例, 向上为正; 整屏高度 = 100%. */
+    fun adjustVolume(fraction: Float) {
+        val pct = (_state.value.volume + fraction * 100f).coerceIn(0f, 100f)
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(pct * max / 100f), 0)
+        _state.update { it.copy(volume = pct) }
+        showIndicator("音量 ${pct.toInt()}%")
+    }
+
+    /** [fraction]: 同 [adjustVolume]. 实际亮度由 PlayerScreen 写入窗口. */
+    fun adjustBrightness(fraction: Float) {
+        val base = _state.value.brightness.takeIf { it >= 0f } ?: systemBrightness()
+        val value = (base + fraction).coerceIn(0.01f, 1f)
+        _state.update { it.copy(brightness = value) }
+        showIndicator("亮度 ${(value * 100).toInt()}%")
+    }
+
+    private fun systemBrightness(): Float {
+        val raw = try {
+            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
+        } catch (_: Exception) {
+            0.5f
+        }
+        return raw.coerceIn(0.01f, 1f)
+    }
+
+    private fun showIndicator(text: String) {
+        _state.update { it.copy(indicator = text) }
+        indicatorJob?.cancel()
+        indicatorJob = viewModelScope.launch {
+            delay(800L)
+            _state.update { it.copy(indicator = null) }
+        }
     }
 
     fun setSpeed(speed: Float) {

@@ -69,6 +69,9 @@ class SettingsViewModel @Inject constructor(
     fun setShowThumbnail(v: Boolean) = viewModelScope.launch {
         settingsRepository.updateShowThumbnail(v)
     }
+    fun setSwipeSwitchVideo(v: Boolean) = viewModelScope.launch {
+        settingsRepository.updateSwipeSwitchVideo(v)
+    }
     fun setContinuousPlay(v: Boolean) = viewModelScope.launch {
         settingsRepository.updateContinuousPlay(v)
     }

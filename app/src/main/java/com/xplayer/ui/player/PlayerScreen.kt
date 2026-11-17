@@ -84,6 +84,24 @@ fun PlayerScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // 亮度: 用户调节后写入窗口亮度, 离开页面时恢复为系统亮度.
+    LaunchedEffect(state.brightness) {
+        if (state.brightness >= 0f) {
+            activity?.window?.let { w ->
+                w.attributes = w.attributes.also { it.screenBrightness = state.brightness }
+            }
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            activity?.window?.let { w ->
+                w.attributes = w.attributes.also {
+                    it.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                }
+            }
+        }
+    }
+
     // Keep screen on
     DisposableEffect(Unit) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -132,12 +150,10 @@ fun PlayerScreen(
             onTap = { viewModel.toggleControls() },
             onSeekRelative = { viewModel.seekRelative(it) },
             onSeekTo = { viewModel.seekTo(it) },
-            onVolumeChange = { delta ->
-                viewModel.setVolume((state.volume + delta).coerceIn(0, 200))
-            },
-            onBrightnessChange = { delta ->
-                viewModel.setBrightness(state.brightness + delta)
-            },
+            onNext = { viewModel.playNext() },
+            onPrevious = { viewModel.playPrevious() },
+            onVolumeChange = { viewModel.adjustVolume(it) },
+            onBrightnessChange = { viewModel.adjustBrightness(it) },
             onTogglePlay = { viewModel.togglePlayPause() },
             onToggleLock = { viewModel.toggleLock() },
             onSpeedSelect = { viewModel.setSpeed(it) },
@@ -145,6 +161,19 @@ fun PlayerScreen(
             onSubTrack = { viewModel.selectSubtitleTrack(it) },
             onMenuOpenChanged = { open -> if (open) viewModel.holdControls() else viewModel.showControls() },
         )
+
+        // 亮度 / 音量调节提示
+        state.indicator?.let { text ->
+            Text(
+                text = text,
+                color = Color.White,
+                fontSize = 16.sp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(0.6f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
 
         // Buffering indicator
         AnimatedVisibility(
@@ -218,7 +247,9 @@ private fun PlayerOverlay(
     onTap: () -> Unit,
     onSeekRelative: (Long) -> Unit,
     onSeekTo: (Long) -> Unit,
-    onVolumeChange: (Int) -> Unit,
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
+    onVolumeChange: (Float) -> Unit,
     onBrightnessChange: (Float) -> Unit,
     onTogglePlay: () -> Unit,
     onToggleLock: () -> Unit,
@@ -242,10 +273,11 @@ private fun PlayerOverlay(
                 onDoubleTap = onTogglePlay,
                 onSwipeLeft  = { dx -> onSeekRelative(-(dx * 300).toLong()) },
                 onSwipeRight = { dx -> onSeekRelative((dx * 300).toLong()) },
-                onSwipeUpLeft   = { dy -> onBrightnessChange(dy * 0.5f) },
-                onSwipeDownLeft = { dy -> onBrightnessChange(dy * 0.5f) },
-                onSwipeUpRight   = { dy -> onVolumeChange((dy * 50).toInt()) },
-                onSwipeDownRight = { dy -> onVolumeChange((dy * 50).toInt()) },
+                switchEnabled = state.swipeSwitchVideo,
+                onSwipeUp   = onNext,      // 上滑: 下一个视频 (同抖音)
+                onSwipeDown = onPrevious,  // 下滑: 上一个视频
+                onVolumeChange = onVolumeChange,          // 开关关闭时: 右半屏上下滑
+                onBrightnessChange = onBrightnessChange,  // 开关关闭时: 左半屏上下滑
             )
         }
 
@@ -285,10 +317,11 @@ private fun GestureLayer(
     onDoubleTap: () -> Unit,
     onSwipeLeft: (Float) -> Unit,
     onSwipeRight: (Float) -> Unit,
-    onSwipeUpLeft: (Float) -> Unit,
-    onSwipeDownLeft: (Float) -> Unit,
-    onSwipeUpRight: (Float) -> Unit,
-    onSwipeDownRight: (Float) -> Unit,
+    switchEnabled: Boolean,
+    onSwipeUp: () -> Unit,
+    onSwipeDown: () -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    onBrightnessChange: (Float) -> Unit,
 ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         Box(
@@ -300,20 +333,36 @@ private fun GestureLayer(
                         onDoubleTap = { onDoubleTap() }
                     )
                 }
-                .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val isLeft = change.position.x < size.width / 2
-                        val dx = dragAmount.x / size.width
-                        val dy = -dragAmount.y / size.height
-                        if (abs(dragAmount.x) > abs(dragAmount.y)) {
-                            if (dx < 0) onSwipeLeft(abs(dx)) else onSwipeRight(dx)
-                        } else {
-                            if (isLeft) {
-                                if (dy > 0) onSwipeUpLeft(dy) else onSwipeDownLeft(dy)
-                            } else {
-                                if (dy > 0) onSwipeUpRight(dy) else onSwipeDownRight(dy)
+                .pointerInput(switchEnabled) {
+                    // 一次拖动只认一个方向: 横向 = 快进/快退;
+                    // 纵向 = 开关开启时松手切换视频, 关闭时左半屏调亮度 / 右半屏调音量.
+                    var horizontal: Boolean? = null
+                    var totalY = 0f
+                    var startLeft = true
+                    val switchThreshold = size.height * 0.12f
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            horizontal = null
+                            totalY = 0f
+                            startLeft = offset.x < size.width / 2f
+                        },
+                        onDragEnd = {
+                            if (switchEnabled && horizontal == false) {
+                                if (totalY <= -switchThreshold) onSwipeUp()
+                                else if (totalY >= switchThreshold) onSwipeDown()
                             }
+                        },
+                    ) { change, dragAmount ->
+                        change.consume()
+                        if (horizontal == null) horizontal = abs(dragAmount.x) > abs(dragAmount.y)
+                        if (horizontal == true) {
+                            val dx = dragAmount.x / size.width
+                            if (dx < 0) onSwipeLeft(abs(dx)) else onSwipeRight(dx)
+                        } else if (switchEnabled) {
+                            totalY += dragAmount.y
+                        } else {
+                            val fraction = -dragAmount.y / size.height
+                            if (startLeft) onBrightnessChange(fraction) else onVolumeChange(fraction)
                         }
                     }
                 }
