@@ -76,6 +76,10 @@ class PlayerViewModel @Inject constructor(
     private var currentPath: String = videoPath
 
     private var continuousPlay = true
+
+    /** 正在切换视频 (滑动 / 连播): 期间的短暂"未播放"不应唤出控制栏. */
+    @Volatile
+    private var switching = false
     private var indicatorJob: Job? = null
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
@@ -153,8 +157,12 @@ class PlayerViewModel @Inject constructor(
         playlistIndex = index
         currentPath = video.path
         progressJob?.cancel()
+        // 切换视频不显示控制栏: 若已显示则收起, 并屏蔽切换间隙的"未播放"状态.
+        switching = true
+        hideControlsJob?.cancel()
         _state.update {
             it.copy(
+                showControls = false,
                 videoPath = video.path,
                 title = video.path.substringAfterLast("/"),
                 position = 0L,
@@ -186,8 +194,10 @@ class PlayerViewModel @Inject constructor(
 
         override fun onPlayingChanged(playing: Boolean) {
             // 暂停时控制栏常驻; 恢复播放后重新计时自动隐藏.
-            _state.update { it.copy(isPlaying = playing, showControls = if (!playing) true else it.showControls) }
-            if (playing) scheduleHideControls() else hideControlsJob?.cancel()
+            if (playing) switching = false
+            val showForPause = !playing && !switching
+            _state.update { it.copy(isPlaying = playing, showControls = if (showForPause) true else it.showControls) }
+            if (playing) scheduleHideControls() else if (showForPause) hideControlsJob?.cancel()
         }
 
         override fun onBuffering(buffering: Boolean) {
@@ -204,6 +214,7 @@ class PlayerViewModel @Inject constructor(
         }
 
         override fun onError(code: Int, message: String) {
+            switching = false
             _state.update { it.copy(isBuffering = false, message = message) }
         }
 
