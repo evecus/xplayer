@@ -105,7 +105,7 @@ class ExoEngine(decoderMode: DecoderMode, context: Context) : PlayerEngine {
     override val bufferedPosition: Long get() = exo.bufferedPosition.coerceAtLeast(0L)
 
     override fun setSurface(surface: Surface?) {
-        exo.setVideoSurface(surface)
+        if (surface == null) exo.clearVideoSurface() else exo.setVideoSurface(surface)
     }
 
     override fun open(request: PlayRequest) {

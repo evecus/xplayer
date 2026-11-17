@@ -1,6 +1,8 @@
 package com.xplayer.ui
 
 import android.net.Uri
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -57,6 +59,11 @@ fun XPlayerApp(externalVideoPath: String? = null) {
             composable(
                 route = Screen.Player.route,
                 arguments = listOf(navArgument("videoPath") { type = NavType.StringType }),
+                // SurfaceView 不跟随 Compose 动画, 播放页进出一律不做转场, 否则退出时画面会残留.
+                enterTransition = { EnterTransition.None },
+                exitTransition = { ExitTransition.None },
+                popEnterTransition = { EnterTransition.None },
+                popExitTransition = { ExitTransition.None },
             ) {
                 PlayerScreen(
                     onBack = { navController.popBackStack() },

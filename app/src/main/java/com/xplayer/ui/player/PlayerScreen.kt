@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -38,6 +39,13 @@ fun PlayerScreen(
     onBack: () -> Unit,
     viewModel: PlayerViewModel = hiltViewModel(),
 ) {
+    // 返回前先停播并摘掉 Surface, 避免退出动画期间画面残留在上一页.
+    val leave = {
+        viewModel.stopAndDetach()
+        onBack()
+    }
+    BackHandler(onBack = leave)
+
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
@@ -72,7 +80,7 @@ fun PlayerScreen(
         // Gesture + controls overlay
         PlayerOverlay(
             state = state,
-            onBack = onBack,
+            onBack = leave,
             onTap = { viewModel.toggleControls() },
             onSeekRelative = { viewModel.seekRelative(it) },
             onSeekTo = { viewModel.seekTo(it) },

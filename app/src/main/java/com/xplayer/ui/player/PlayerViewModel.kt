@@ -146,7 +146,23 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun onSurfaceDestroyed() {
+        surface = null
         engine?.setSurface(null)
+    }
+
+    /**
+     * 离开播放页时立即调用: 停止播放并摘除渲染表面.
+     * 不能等 onCleared —— 它要等导航退出动画结束后才触发, 期间 SurfaceView 会一直显示最后画面.
+     */
+    fun stopAndDetach() {
+        progressJob?.cancel()
+        hideControlsJob?.cancel()
+        surface = null
+        engine?.let {
+            it.pause()
+            it.setSurface(null)
+            it.stop()
+        }
     }
 
     private fun attachAndOpen(s: Surface) {
