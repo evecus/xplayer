@@ -49,6 +49,9 @@ data class PlayerUiState(
 
 data class TrackInfo(val id: Int, val name: String)
 
+/** 无操作多久后自动隐藏播放控制 (进入全屏播放). */
+private const val CONTROLS_HIDE_DELAY_MS = 2_000L
+
 @HiltViewModel
 class PlayerViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
@@ -69,6 +72,7 @@ class PlayerViewModel @Inject constructor(
     private var surface: Surface? = null
 
     init {
+        scheduleHideControls()
         viewModelScope.launch {
             val settings = settingsRepository.settingsFlow.first()
             val resolved = resolveOrientation(settings.defaultOrientation, videoPath)
@@ -95,7 +99,9 @@ class PlayerViewModel @Inject constructor(
         }
 
         override fun onPlayingChanged(playing: Boolean) {
-            _state.update { it.copy(isPlaying = playing) }
+            // 暂停时控制栏常驻; 恢复播放后重新计时自动隐藏.
+            _state.update { it.copy(isPlaying = playing, showControls = if (!playing) true else it.showControls) }
+            if (playing) scheduleHideControls() else hideControlsJob?.cancel()
         }
 
         override fun onBuffering(buffering: Boolean) {
@@ -273,19 +279,33 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun toggleControls() {
+        // 暂停时控制栏常驻, 点击不隐藏
+        if (!_state.value.isPlaying) {
+            _state.update { it.copy(showControls = true) }
+            return
+        }
         val showing = _state.value.showControls
         _state.update { it.copy(showControls = !showing) }
         if (!showing) scheduleHideControls()
         else hideControlsJob?.cancel()
     }
 
+    /** App 进入后台时调用: 暂停播放 (音视频都停), 不自动恢复. */
+    fun pause() {
+        engine?.pause()
+    }
+
+    /** 菜单弹窗打开期间暂停自动隐藏. */
+    fun holdControls() { hideControlsJob?.cancel() }
+
     fun consumeMessage() { _state.update { it.copy(message = null) } }
 
     private fun scheduleHideControls() {
         hideControlsJob?.cancel()
         hideControlsJob = viewModelScope.launch {
-            delay(4_000L)
-            _state.update { it.copy(showControls = false) }
+            delay(CONTROLS_HIDE_DELAY_MS)
+            // 暂停 / 加载中不隐藏
+            if (_state.value.isPlaying) _state.update { it.copy(showControls = false) }
         }
     }
 

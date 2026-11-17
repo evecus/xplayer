@@ -28,27 +28,41 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.xplayer.data.model.PlayOrientation
 import com.xplayer.ui.theme.*
 import kotlin.math.abs
+
+/** 进度条已播放部分 (青色) 与拖动圆点 (紫色). */
+private val ProgressPlayed = Color(0xFF00E5FF)
+private val ProgressThumb = Color(0xFF9C4DFF)
 
 @Composable
 fun PlayerScreen(
     onBack: () -> Unit,
     viewModel: PlayerViewModel = hiltViewModel(),
 ) {
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val activity = context as? Activity
+
     // 返回前先停播并摘掉 Surface, 避免退出动画期间画面残留在上一页.
     val leave = {
         viewModel.stopAndDetach()
+        activity?.window?.let {
+            WindowCompat.getInsetsController(it, it.decorView).show(WindowInsetsCompat.Type.systemBars())
+        }
         onBack()
     }
     BackHandler(onBack = leave)
 
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val activity = context as? Activity
 
     // Apply orientation setting using resolvedOrientation (never DEFAULT).
     LaunchedEffect(state.resolvedOrientation) {
@@ -60,12 +74,46 @@ fun PlayerScreen(
         }
     }
 
+    // 不支持后台播放: App 进入后台 (按 Home / 切应用 / 锁屏) 即暂停, 回到前台保持暂停.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) viewModel.pause()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // Keep screen on
     DisposableEffect(Unit) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    // 播放页全程隐藏状态栏和底部导航条 (边缘滑动可临时唤出, 随后自动再隐藏);
+    // 状态栏图标强制浅色, 退出时恢复.
+    val window = activity?.window
+    if (window != null) {
+        val controller = remember(window) { WindowCompat.getInsetsController(window, window.decorView) }
+        // 弹窗等造成窗口焦点变化后系统栏可能被带出, 状态变化时重新隐藏.
+        LaunchedEffect(state.showControls, state.isLocked, state.isPlaying) {
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        DisposableEffect(window) {
+            val wasLightStatus = controller.isAppearanceLightStatusBars
+            val wasLightNav = controller.isAppearanceLightNavigationBars
+            controller.isAppearanceLightStatusBars = false
+            controller.isAppearanceLightNavigationBars = false
+            onDispose {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                controller.isAppearanceLightStatusBars = wasLightStatus
+                controller.isAppearanceLightNavigationBars = wasLightNav
+            }
         }
     }
 
@@ -95,6 +143,7 @@ fun PlayerScreen(
             onSpeedSelect = { viewModel.setSpeed(it) },
             onAudioTrack = { viewModel.selectAudioTrack(it) },
             onSubTrack = { viewModel.selectSubtitleTrack(it) },
+            onMenuOpenChanged = { open -> if (open) viewModel.holdControls() else viewModel.showControls() },
         )
 
         // Buffering indicator
@@ -176,6 +225,7 @@ private fun PlayerOverlay(
     onSpeedSelect: (Float) -> Unit,
     onAudioTrack: (Int) -> Unit,
     onSubTrack: (Int) -> Unit,
+    onMenuOpenChanged: (Boolean) -> Unit,
 ) {
     Box(
         modifier = Modifier
@@ -189,8 +239,7 @@ private fun PlayerOverlay(
         if (!state.isLocked) {
             GestureLayer(
                 onTap = onTap,
-                onDoubleTapLeft  = { onSeekRelative(-10_000L) },
-                onDoubleTapRight = { onSeekRelative(10_000L) },
+                onDoubleTap = onTogglePlay,
                 onSwipeLeft  = { dx -> onSeekRelative(-(dx * 300).toLong()) },
                 onSwipeRight = { dx -> onSeekRelative((dx * 300).toLong()) },
                 onSwipeUpLeft   = { dy -> onBrightnessChange(dy * 0.5f) },
@@ -223,6 +272,7 @@ private fun PlayerOverlay(
                     onSpeedSelect = onSpeedSelect,
                     onAudioTrack = onAudioTrack,
                     onSubTrack = onSubTrack,
+                    onMenuOpenChanged = onMenuOpenChanged,
                 )
             }
         }
@@ -232,8 +282,7 @@ private fun PlayerOverlay(
 @Composable
 private fun GestureLayer(
     onTap: () -> Unit,
-    onDoubleTapLeft: () -> Unit,
-    onDoubleTapRight: () -> Unit,
+    onDoubleTap: () -> Unit,
     onSwipeLeft: (Float) -> Unit,
     onSwipeRight: (Float) -> Unit,
     onSwipeUpLeft: (Float) -> Unit,
@@ -248,10 +297,7 @@ private fun GestureLayer(
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = { onTap() },
-                        onDoubleTap = { offset ->
-                            if (offset.x < size.width / 2) onDoubleTapLeft()
-                            else onDoubleTapRight()
-                        }
+                        onDoubleTap = { onDoubleTap() }
                     )
                 }
                 .pointerInput(Unit) {
@@ -285,10 +331,15 @@ private fun PlayerControls(
     onSpeedSelect: (Float) -> Unit,
     onAudioTrack: (Int) -> Unit,
     onSubTrack: (Int) -> Unit,
+    onMenuOpenChanged: (Boolean) -> Unit,
 ) {
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showAudioMenu by remember { mutableStateOf(false) }
     var showSubMenu by remember { mutableStateOf(false) }
+
+    // 弹窗打开时暂停自动隐藏, 关闭后重新计时.
+    val anyMenuOpen = showSpeedMenu || showAudioMenu || showSubMenu
+    LaunchedEffect(anyMenuOpen) { onMenuOpenChanged(anyMenuOpen) }
 
     Column(
         modifier = Modifier
@@ -306,7 +357,7 @@ private fun PlayerControls(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
+                .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -343,18 +394,36 @@ private fun PlayerControls(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             val progress = if (state.duration > 0) state.position.toFloat() / state.duration else 0f
+            // 细线进度条: 白色底线, 已播放部分青色, 拖动点为小紫点.
             Slider(
                 value = progress,
                 onValueChange = { onSeekTo((it * state.duration).toLong()) },
-                colors = SliderDefaults.colors(
-                    thumbColor = GreenPrimary,
-                    activeTrackColor = GreenPrimary,
-                    inactiveTrackColor = Color.White.copy(0.3f),
-                ),
+                thumb = {
+                    Box(
+                        Modifier
+                            .size(12.dp)
+                            .background(ProgressThumb, CircleShape)
+                    )
+                },
+                track = {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(2.dp)
+                            .background(Color.White, RoundedCornerShape(1.dp))
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(progress.coerceIn(0f, 1f))
+                                .fillMaxHeight()
+                                .background(ProgressPlayed, RoundedCornerShape(1.dp))
+                        )
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
 
